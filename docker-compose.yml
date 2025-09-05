@@ -1,0 +1,80 @@
+version: '3.8'
+
+services:
+  # Nodo DNP (Principal)
+  dnp-node:
+    build: .
+    container_name: secop-dnp-node
+    ports:
+      - "8080:8080"
+    environment:
+      - NODE_ID=DNP-NODE
+      - NODE_ADDRESS=localhost
+      - NODE_PORT=8080
+      - INITIAL_PEERS=MEDELLIN-NODE:localhost:8081,BOGOTA-NODE:localhost:8082,CONTROL-NODE:localhost:8083
+    volumes:
+      - ./web:/app/web
+    networks:
+      - secop-network
+    restart: unless-stopped
+
+  # Nodo Medellín
+  medellin-node:
+    build: .
+    container_name: secop-medellin-node
+    ports:
+      - "8081:8081"
+    environment:
+      - NODE_ID=MEDELLIN-NODE
+      - NODE_ADDRESS=localhost
+      - NODE_PORT=8081
+      - INITIAL_PEERS=DNP-NODE:localhost:8080,BOGOTA-NODE:localhost:8082,CONTROL-NODE:localhost:8083
+    volumes:
+      - ./web:/app/web
+    networks:
+      - secop-network
+    restart: unless-stopped
+    depends_on:
+      - dnp-node
+
+  # Nodo Bogotá
+  bogota-node:
+    build: .
+    container_name: secop-bogota-node
+    ports:
+      - "8082:8082"
+    environment:
+      - NODE_ID=BOGOTA-NODE
+      - NODE_ADDRESS=localhost
+      - NODE_PORT=8082
+      - INITIAL_PEERS=DNP-NODE:localhost:8080,MEDELLIN-NODE:localhost:8081,CONTROL-NODE:localhost:8083
+    volumes:
+      - ./web:/app/web
+    networks:
+      - secop-network
+    restart: unless-stopped
+    depends_on:
+      - dnp-node
+
+  # Nodo Contraloría
+  control-node:
+    build: .
+    container_name: secop-control-node
+    ports:
+      - "8083:8083"
+    environment:
+      - NODE_ID=CONTROL-NODE
+      - NODE_ADDRESS=localhost
+      - NODE_PORT=8083
+      - INITIAL_PEERS=DNP-NODE:localhost:8080,MEDELLIN-NODE:localhost:8081,BOGOTA-NODE:localhost:8082
+    volumes:
+      - ./web:/app/web
+    networks:
+      - secop-network
+    restart: unless-stopped
+    depends_on:
+      - dnp-node
+
+networks:
+  secop-network:
+    driver: bridge
