@@ -118,7 +118,15 @@ func (p2p *P2PNetwork) ReceiveBlock(block Block) error {
 	}
 	
 	// Agregar el bloque a nuestra cadena
-	err := p2p.Blockchain.AddBlock(block)
+	blockData := map[string]interface{}{
+		"type":          block.Type,
+		"data":          block.Data,
+		"timestamp":     block.Timestamp,
+		"previous_hash": block.PreviousHash,
+		"nonce":         block.Nonce,
+	}
+	
+	err := p2p.Blockchain.AddBlock(blockData)
 	if err != nil {
 		return fmt.Errorf("error agregando bloque: %v", err)
 	}

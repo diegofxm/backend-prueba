@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"strings"
 	"time"
 
 	"secop-blockchain/internal/blockchain"
@@ -14,6 +15,7 @@ import (
 
 var bc *blockchain.Blockchain
 var p2pNetwork *blockchain.P2PNetwork
+var workflowManager *blockchain.WorkflowManager
 
 func main() {
 	// Obtener configuración del nodo desde variables de entorno
@@ -29,7 +31,10 @@ func main() {
 	// Inicializar red P2P
 	p2pNetwork = blockchain.NewP2PNetwork(nodeID, nodeAddress, nodePort, bc)
 	
-	// Configurar peers iniciales desde variables de entorno
+	// Inicializar workflow manager
+	workflowManager = blockchain.NewWorkflowManager(bc)
+	
+	// Configurar peers iniciales desde variables de entorno (OPCIONAL)
 	setupInitialPeers()
 
 	// Configurar Gin
@@ -54,6 +59,14 @@ func main() {
 	r.POST("/api/contracts", createContract)
 	r.POST("/api/contracts/validate", validateContract)
 	r.GET("/api/stats", getStats)
+
+	// Nuevas rutas de flujo de trabajo SECOP
+	r.GET("/api/workflow/steps", getWorkflowSteps)
+	r.GET("/api/contracts/:id/workflow", getContractWorkflowStatus)
+	r.POST("/api/contracts/:id/validate-step", validateContractStep)
+	r.POST("/api/contracts/:id/audit", addAuditObservation)
+	r.GET("/api/contracts/by-status/:status", getContractsByStatus)
+	r.GET("/api/contracts/by-role/:role", getContractsByRole)
 
 	// Nuevas rutas P2P
 	r.GET("/api/health", healthCheck)
@@ -80,19 +93,31 @@ func main() {
 	r.Run(":" + nodePort)
 }
 
-// setupInitialPeers configura los peers iniciales desde variables de entorno
+// setupInitialPeers configura los peers iniciales desde variables de entorno (OPCIONAL)
 func setupInitialPeers() {
 	peers := getEnv("INITIAL_PEERS", "")
 	if peers == "" {
+		fmt.Printf("🌐 Modo descubrimiento dinámico - sin peers iniciales configurados\n")
+		fmt.Printf("💡 Los nodos se conectarán automáticamente usando /api/p2p/add-peer\n")
 		return
 	}
 
-	// Formato esperado: "NODE1:localhost:8081,NODE2:localhost:8082"
-	// Parsear y agregar peers
 	fmt.Printf("🔗 Configurando peers iniciales: %s\n", peers)
 	
-	// Aquí puedes implementar el parsing de peers si lo necesitas
-	// Por ahora, configuraremos manualmente según el nodo
+	// Parsear peers en formato: "NODE1:localhost:8081,NODE2:localhost:8082"
+	peerList := strings.Split(peers, ",")
+	for _, peerInfo := range peerList {
+		parts := strings.Split(strings.TrimSpace(peerInfo), ":")
+		if len(parts) == 3 {
+			nodeID := parts[0]
+			address := parts[1]
+			port := parts[2]
+			
+			// Agregar peer a la red
+			p2pNetwork.AddPeer(nodeID, address, port)
+			fmt.Printf("✅ Peer agregado: %s (%s:%s)\n", nodeID, address, port)
+		}
+	}
 }
 
 // Nuevos handlers P2P
@@ -296,6 +321,85 @@ func getStats(c *gin.Context) {
 			"latest_block":    bc.Chain[len(bc.Chain)-1],
 		},
 	})
+}
+
+// Handlers de flujo de trabajo SECOP
+func getWorkflowSteps(c *gin.Context) {
+	steps := workflowManager.GetWorkflowSteps()
+	c.JSON(200, gin.H{"steps": steps})
+}
+
+func getContractWorkflowStatus(c *gin.Context) {
+	contractID := c.Param("id")
+	status, err := workflowManager.GetWorkflowStatus(contractID)
+	if err != nil {
+		c.JSON(404, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(200, status)
+}
+
+func validateContractStep(c *gin.Context) {
+	contractID := c.Param("id")
+	
+	var req struct {
+		StepNumber    int    `json:"step_number"`
+		ValidatorID   string `json:"validator_id"`
+		ValidatorName string `json:"validator_name"`
+		Role          string `json:"role"`
+		Approved      bool   `json:"approved"`
+		Comments      string `json:"comments"`
+	}
+	
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(400, gin.H{"error": err.Error()})
+		return
+	}
+	
+	role := blockchain.AdminRole(req.Role)
+	err := workflowManager.ValidateStep(contractID, req.StepNumber, req.ValidatorID, req.ValidatorName, role, req.Approved, req.Comments)
+	if err != nil {
+		c.JSON(400, gin.H{"error": err.Error()})
+		return
+	}
+	
+	c.JSON(200, gin.H{"message": "Paso validado exitosamente"})
+}
+
+func addAuditObservation(c *gin.Context) {
+	contractID := c.Param("id")
+	
+	var req struct {
+		AuditorID   string `json:"auditor_id"`
+		Role        string `json:"role"`
+		Observation string `json:"observation"`
+	}
+	
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(400, gin.H{"error": err.Error()})
+		return
+	}
+	
+	role := blockchain.AdminRole(req.Role)
+	err := workflowManager.AddAuditObservation(contractID, req.AuditorID, role, req.Observation)
+	if err != nil {
+		c.JSON(400, gin.H{"error": err.Error()})
+		return
+	}
+	
+	c.JSON(200, gin.H{"message": "Observación de auditoría agregada"})
+}
+
+func getContractsByStatus(c *gin.Context) {
+	status := c.Param("status")
+	contracts := bc.GetContractsByStatus(blockchain.ContractStatus(status))
+	c.JSON(200, gin.H{"contracts": contracts})
+}
+
+func getContractsByRole(c *gin.Context) {
+	role := c.Param("role")
+	contracts := bc.GetContractsByRole(blockchain.AdminRole(role))
+	c.JSON(200, gin.H{"contracts": contracts})
 }
 
 // Función auxiliar para obtener variables de entorno

@@ -1,7 +1,6 @@
 package blockchain
 
 import (
-	"encoding/json"
 	"errors"
 	"fmt"
 	"time"
@@ -11,8 +10,9 @@ import (
 
 // Blockchain representa la cadena de bloques SECOP
 type Blockchain struct {
-	Chain     []*Block             `json:"chain"`
-	Contracts map[string]*Contract `json:"contracts"`
+	Chain           []*Block             `json:"chain"`
+	Contracts       map[string]*Contract `json:"contracts"`
+	WorkflowManager *WorkflowManager     `json:"-"`
 }
 
 // NewBlockchain crea una nueva blockchain con bloque génesis
@@ -26,13 +26,18 @@ func NewBlockchain() *Blockchain {
 	}
 	genesisBlock.Hash = genesisBlock.calculateHash()
 
-	return &Blockchain{
+	bc := &Blockchain{
 		Chain:     []*Block{genesisBlock},
 		Contracts: make(map[string]*Contract),
 	}
+	
+	// Inicializar el gestor de flujo de trabajo
+	bc.WorkflowManager = NewWorkflowManager(bc)
+	
+	return bc
 }
 
-// AddContract agrega un nuevo contrato a la blockchain
+// AddContract agrega un nuevo contrato a la blockchain con flujo de trabajo
 func (bc *Blockchain) AddContract(contract *Contract) error {
 	// Validar contrato
 	if err := bc.validateContract(contract); err != nil {
@@ -44,27 +49,71 @@ func (bc *Blockchain) AddContract(contract *Contract) error {
 		contract.ID = uuid.New().String()
 	}
 
-	// Establecer timestamp
+	// Establecer timestamp y estado inicial
 	contract.CreatedAt = time.Now()
-	contract.Status = "CREADO"
+	contract.UpdatedAt = time.Now()
+	contract.Status = StatusDraft
+
+	// Inicializar flujo de trabajo
+	if err := bc.WorkflowManager.InitializeContractWorkflow(contract); err != nil {
+		return fmt.Errorf("error inicializando flujo de trabajo: %v", err)
+	}
+
+	// Agregar a la blockchain
+	bc.Contracts[contract.ID] = contract
 
 	// Crear bloque para el contrato
 	blockData := map[string]interface{}{
-		"type":     "CONTRACT_CREATION",
-		"contract": contract,
+		"type":        "CONTRACT_CREATION",
+		"contract_id": contract.ID,
+		"entity_code": contract.EntityCode,
+		"entity_name": contract.EntityName,
+		"amount":      contract.Amount,
+		"created_by":  contract.CreatedBy,
+		"timestamp":   contract.CreatedAt,
 	}
 
-	block := NewBlock(blockData, bc.getLatestBlock().Hash)
-	block.Index = len(bc.Chain)
-	block.Type = "CONTRACT_CREATION" // Establecer tipo de bloque
-	block.Hash = block.calculateHash()
+	return bc.AddBlock(blockData)
+}
 
-	// Agregar bloque a la cadena
-	bc.Chain = append(bc.Chain, block)
-	bc.Contracts[contract.ID] = contract
+// ValidateContractStep valida un paso del flujo de trabajo
+func (bc *Blockchain) ValidateContractStep(contractID string, stepNumber int, validatorID string, validatorName string, role AdminRole, approved bool, comments string) error {
+	return bc.WorkflowManager.ValidateStep(contractID, stepNumber, validatorID, validatorName, role, approved, comments)
+}
 
-	fmt.Printf("✅ Contrato %s agregado al bloque %d\n", contract.ID, block.Index)
-	return nil
+// AddAuditObservation agrega una observación de auditoría
+func (bc *Blockchain) AddAuditObservation(contractID string, auditorID string, role AdminRole, observation string) error {
+	return bc.WorkflowManager.AddAuditObservation(contractID, auditorID, role, observation)
+}
+
+// GetContractWorkflowStatus obtiene el estado del flujo de trabajo de un contrato
+func (bc *Blockchain) GetContractWorkflowStatus(contractID string) (*WorkflowStatus, error) {
+	return bc.WorkflowManager.GetContractWorkflowStatus(contractID)
+}
+
+// GetContractsByStatus obtiene contratos por estado
+func (bc *Blockchain) GetContractsByStatus(status ContractStatus) []*Contract {
+	var contracts []*Contract
+	for _, contract := range bc.Contracts {
+		if contract.Status == status {
+			contracts = append(contracts, contract)
+		}
+	}
+	return contracts
+}
+
+// GetContractsByRole obtiene contratos que requieren validación de un rol específico
+func (bc *Blockchain) GetContractsByRole(role AdminRole) []*Contract {
+	var contracts []*Contract
+	for _, contract := range bc.Contracts {
+		if contract.CurrentStep <= len(contract.ValidationSteps) {
+			currentStepRole := contract.ValidationSteps[contract.CurrentStep-1].Role
+			if currentStepRole == role && contract.ValidationSteps[contract.CurrentStep-1].Status == ValidationPending {
+				contracts = append(contracts, contract)
+			}
+		}
+	}
+	return contracts
 }
 
 // ValidateContract valida un contrato por parte de un nodo
@@ -74,9 +123,9 @@ func (bc *Blockchain) ValidateContract(contractID string, nodeID string, approve
 		return errors.New("contrato no encontrado")
 	}
 
-	// Crear evento de validación
+	// Crear bloque de validación
 	validationData := map[string]interface{}{
-		"type":        "CONTRACT_VALIDATION",
+		"type":        "VALIDATION",
 		"contract_id": contractID,
 		"node_id":     nodeID,
 		"approved":    approved,
@@ -84,25 +133,16 @@ func (bc *Blockchain) ValidateContract(contractID string, nodeID string, approve
 		"timestamp":   time.Now(),
 	}
 
-	block := NewBlock(validationData, bc.getLatestBlock().Hash)
-	block.Index = len(bc.Chain)
-	bc.Chain = append(bc.Chain, block)
-
-	// Actualizar estado del contrato
+	// Actualizar estado del contrato basado en el flujo de trabajo
 	if approved {
-		contract.ValidationNodes = append(contract.ValidationNodes, nodeID)
-		if len(contract.ValidationNodes) >= 4 { // Requiere 4 validaciones internas
-			contract.Status = "APROBADO_INTERNAMENTE"
-		}
+		// El estado se maneja ahora a través del WorkflowManager
+		fmt.Printf("✅ Validación aprobada para contrato %s por nodo %s\n", contractID, nodeID)
+	} else {
+		contract.Status = StatusRejected
+		fmt.Printf("❌ Validación rechazada para contrato %s por nodo %s: %s\n", contractID, nodeID, reason)
 	}
 
-	status := "RECHAZADO"
-	if approved {
-		status = "APROBADO"
-	}
-
-	fmt.Printf("✅ Validación %s para contrato %s por nodo %s\n", status, contractID, nodeID)
-	return nil
+	return bc.AddBlock(validationData)
 }
 
 // GetContract obtiene un contrato por ID
@@ -197,30 +237,28 @@ func (bc *Blockchain) HasBlock(hash string) bool {
 	return false
 }
 
-// AddBlock agrega un bloque existente a la cadena
-func (bc *Blockchain) AddBlock(block Block) error {
+// AddBlock agrega un nuevo bloque a la cadena con datos
+func (bc *Blockchain) AddBlock(blockData map[string]interface{}) error {
+	// Crear el bloque con los datos proporcionados
+	block := NewBlock(blockData, bc.getLatestBlock().Hash)
+	block.Index = len(bc.Chain)
+	
+	// Establecer tipo de bloque si está especificado
+	if blockType, ok := blockData["type"].(string); ok {
+		block.Type = blockType
+	}
+	
+	// Recalcular hash con el índice correcto
+	block.Hash = block.calculateHash()
+
 	// Verificar que el bloque sea válido
-	if !bc.IsValidBlock(block) {
+	if !bc.IsValidBlock(*block) {
 		return errors.New("bloque inválido")
 	}
-	
-	// Verificar que no tengamos ya este bloque
-	if bc.HasBlock(block.Hash) {
-		return errors.New("bloque ya existe")
-	}
-	
-	// Agregar el bloque
-	bc.Chain = append(bc.Chain, &block)
-	
-	// Si es un bloque de contrato, agregarlo al mapa de contratos
-	if block.Type == "CONTRACT_CREATION" {
-		var contract Contract
-		err := json.Unmarshal([]byte(fmt.Sprintf("%v", block.Data)), &contract)
-		if err == nil {
-			bc.Contracts[contract.ID] = &contract
-		}
-	}
-	
+
+	// Agregar a la cadena
+	bc.Chain = append(bc.Chain, block)
+	fmt.Printf("✅ Bloque %d agregado a la cadena\n", block.Index)
 	return nil
 }
 
